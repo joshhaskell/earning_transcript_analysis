@@ -3,7 +3,8 @@ import os
 import io
 import json
 import pandas as pd
-from datetime import datetime
+from datetime import datetime, timedelta
+import time
 
 # Load environment variables
 from dotenv import load_dotenv
@@ -58,18 +59,32 @@ def fetch_earning_transcripts(ticker, fmp_api_key):
                 print(f"Error fetching transcripts for {ticker} in {year} Q{quarter}: {e}")
     return transcripts
 
-def fetch_financial_data(ticker, fmp_api_key):
-    """Fetch financial data from the income statement for a given ticker."""
-    url = f"https://financialmodelingprep.com/api/v3/financials/income-statement/{ticker}?apikey={fmp_api_key}"
-    try:
+def fetch_historical_prices(tickers, fmp_api_key, start_year, end_year):
+    """Fetch historical end-of-day prices for list of tickers."""
+    historical_prices = []
+    start_date = datetime(start_year, 1, 1)
+    end_date = datetime(end_year, 12, 31)
+    current_date = start_date
+
+    while current_date <= end_date:
+        url = f"https://financialmodelingprep.com/api/v4/batch-request-end-of-day-prices?date={current_date.strftime('%Y-%m-%d')}&apikey={fmp_api_key}"
         response = requests.get(url)
         if response.status_code == 200:
-            return response.json()
+            data = pd.read_csv(io.BytesIO(response.content))
+            # Filter for our tickers of interest
+            filtered_data = data[data['symbol'].isin(tickers)]
+            if not filtered_data.empty:
+                filtered_data.loc[:,'date'] = current_date
+                historical_prices.append(filtered_data)
         else:
-            print(f"Failed to fetch financial data for {ticker}: HTTP {response.status_code}")
-    except Exception as e:
-        print(f"Error fetching financial data for {ticker}: {e}")
-    return None
+            print(f"Failed to fetch price data for date {current_date.strftime('%Y-%m-%d')}: HTTP {response.status_code}")
+
+        time.sleep(.5) # slow down for rate limit
+        current_date += timedelta(days=1)
+
+    # Combine into a single DataFrame
+    historical_prices_df = pd.concat(historical_prices, ignore_index=True)
+    return historical_prices_df
 
 def save_data(data, filename):
     """Save data to a file in the data/raw directory."""
@@ -85,17 +100,21 @@ def main():
     if not tickers:
         print("No US airline tickers found. Exiting.")
         return
-
+    # Getting transcripts
     for ticker in tickers:
         print(f"Fetching data for {ticker}...")
         transcripts = fetch_earning_transcripts(ticker, FMP_API_KEY)
         if not transcripts:
             print(f"No transcripts available for {ticker}. Skipping.")
-            continue
-        financial_data = fetch_financial_data(ticker, FMP_API_KEY)
+        else:
+            save_data(transcripts, f"{ticker}_transcripts.json")
 
-        save_data(transcripts, f"{ticker}_transcripts.json")
-        save_data(financial_data, f"{ticker}_financials.json")
+    # Getting historical prices
+    print("Fetching historical prices")
+    historical_prices_df = fetch_historical_prices(tickers, FMP_API_KEY, YEARS[0], YEARS[-1])
+    historical_prices_file_path = os.path.join('data', 'raw', 'historical_prices.csv')
+    historical_prices_df.to_csv(historical_prices_file_path, index=False)
+    print(f"Historical prices data saved to {historical_prices_file_path}")
 
 if __name__ == "__main__":
     main()
