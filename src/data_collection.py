@@ -62,29 +62,34 @@ def fetch_earning_transcripts(ticker, fmp_api_key):
 def fetch_historical_prices(tickers, fmp_api_key, start_year, end_year):
     """Fetch historical end-of-day prices for list of tickers."""
     historical_prices = []
+    error_dates = [] 
     start_date = datetime(start_year, 1, 1)
-    end_date = datetime(end_year, 12, 31)
+    end_date = datetime.now() - timedelta(days=1)
     current_date = start_date
 
     while current_date <= end_date:
         url = f"https://financialmodelingprep.com/api/v4/batch-request-end-of-day-prices?date={current_date.strftime('%Y-%m-%d')}&apikey={fmp_api_key}"
         response = requests.get(url)
         if response.status_code == 200:
-            data = pd.read_csv(io.BytesIO(response.content))
-            # Filter for our tickers of interest
-            filtered_data = data[data['symbol'].isin(tickers)]
-            if not filtered_data.empty:
-                filtered_data.loc[:,'date'] = current_date
-                historical_prices.append(filtered_data)
+            try:
+                data = pd.read_csv(io.BytesIO(response.content))
+                # Filter for our tickers of interest
+                filtered_data = data[data['symbol'].isin(tickers)]
+                if not filtered_data.empty:
+                    filtered_data.loc[:,'date'] = current_date
+                    historical_prices.append(filtered_data)
+            except pd.errors.EmptyDataError:
+                print(f"No data to parse for date {current_date.strftime('%Y-%m-%d')}")
+                error_dates.append(current_date.strftime('%Y-%m-%d'))
         else:
             print(f"Failed to fetch price data for date {current_date.strftime('%Y-%m-%d')}: HTTP {response.status_code}")
 
-        time.sleep(.5) # slow down for rate limit
+        time.sleep(0.1)  # slow down for rate limit
         current_date += timedelta(days=1)
 
     # Combine into a single DataFrame
-    historical_prices_df = pd.concat(historical_prices, ignore_index=True)
-    return historical_prices_df
+    historical_prices_df = pd.concat(historical_prices, ignore_index=True) if historical_prices else pd.DataFrame()
+    return historical_prices_df, error_dates
 
 def save_data(data, filename):
     """Save data to a file in the data/raw directory."""
@@ -111,10 +116,15 @@ def main():
 
     # Getting historical prices
     print("Fetching historical prices")
-    historical_prices_df = fetch_historical_prices(tickers, FMP_API_KEY, YEARS[0], YEARS[-1])
-    historical_prices_file_path = os.path.join('data', 'raw', 'historical_prices.csv')
-    historical_prices_df.to_csv(historical_prices_file_path, index=False)
-    print(f"Historical prices data saved to {historical_prices_file_path}")
+    historical_prices_df, error_dates = fetch_historical_prices(tickers, FMP_API_KEY, YEARS[0], YEARS[-1])
+    current_directory = os.path.dirname(os.path.abspath(__file__)) # getting current directory absolute path
+    data_directory = os.path.join(current_directory, '..', 'data', 'raw') # adding current directory to the path
+    os.makedirs(data_directory, exist_ok=True) 
+    historical_prices_df.to_csv(os.path.join(data_directory, 'historical_prices.csv'), index=False)
+
+    # saving error dates
+    pd.DataFrame({'error_dates':error_dates}).to_csv(os.path.join(data_directory, 'error_dates.csv'), index=False)
+    print(f"Historical prices data saved to {os.path.join(data_directory, 'historical_prices.csv')}")
 
 if __name__ == "__main__":
     main()
