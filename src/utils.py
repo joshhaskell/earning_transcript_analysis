@@ -7,6 +7,8 @@ from nltk.corpus import stopwords
 from nltk.stem import WordNetLemmatizer
 from nltk import ngrams
 from textblob import TextBlob
+import os
+import glob
 
 # Constants
 # Set range of years here
@@ -89,3 +91,82 @@ def plot_ticker_volatility(ax, summarized_df, ticker):
     ax.set_xlabel('Earnings Call Dates')
     ax.set_ylabel('Avg Volatility (Std. Dev. of Daily Returns %)')
     ax.yaxis.set_major_formatter(plt.FuncFormatter('{:.0f}%'.format))
+
+
+def adjust_to_trading_day(date, trading_dates):
+    """Adjust the given date to the nearest trading day if it is not already a trading day."""
+    while date not in trading_dates:
+        date -= pd.Timedelta(days=1)
+    return date
+
+def load_and_prepare_prices(filepath, tickers_to_drop):
+    """Loads and preprocesses the stock price data."""
+    df = pd.read_csv(filepath)
+    df = df[~df['symbol'].isin(tickers_to_drop)]
+    df['date'] = pd.to_datetime(df['date']).dt.normalize()
+    return df
+
+def load_and_combine_transcripts(directory, tickers_to_drop):
+    """Loads and combines transcript data from multiple files."""
+    transcript_files = glob.glob(os.path.join(directory, '*_transcripts.json'))
+    all_transcripts = [pd.read_json(file) for file in transcript_files]
+    combined_df = pd.concat(all_transcripts, ignore_index=True)
+    combined_df = combined_df[~combined_df['symbol'].isin(tickers_to_drop)]
+    combined_df['date'] = pd.to_datetime(combined_df['date']).dt.normalize()
+    return combined_df
+
+def get_pre_call_window_metrics(df, ticker, days_before):
+    """Create a window of time before each earnings call date for a given ticker."""
+    metrics_data = []
+    ticker_df = df[df['symbol'] == ticker]
+    call_dates = ticker_df[~ticker_df['content'].isna()]['date'].unique()
+
+    for date in call_dates:
+        # Adjust the date if it falls on a weekend or non-trading day
+        adjusted_date = date
+        while adjusted_date.weekday() > 4 or adjusted_date not in ticker_df['date'].values:
+            adjusted_date -= pd.Timedelta(days=1)
+
+        start_date = adjusted_date - pd.Timedelta(days=days_before)
+
+        # Filter data within the time window for the specific ticker
+        data_in_window = ticker_df[(ticker_df['date'] >= start_date) & (ticker_df['date'] < adjusted_date)]
+
+        # Calculate metrics
+        volatility = data_in_window['close'].std() if len(data_in_window) > 1 else 0
+        percent_change = ((data_in_window['close'].iloc[-1] - data_in_window['close'].iloc[0]) / data_in_window['close'].iloc[0]) * 100 if len(data_in_window) > 0 else 0
+
+        metrics_data.append({
+            'original_call_date': date,
+            'adjusted_call_date': adjusted_date,
+            'symbol': ticker,
+            'timeframe': f'{days_before}_days_before',
+            'volatility': volatility,
+            'pre_call_price_percent_change': percent_change
+        })
+
+    return pd.DataFrame(metrics_data)
+
+def calculate_post_call_price_direction(original_df, metrics_df, post_call_days):
+    """Calculate the price direction after a specified number of days post earnings call."""
+    post_call_direction = []
+
+    for index, row in metrics_df.iterrows():
+        call_date = row['original_call_date']
+        ticker = row['symbol']
+        post_call_date = call_date + pd.Timedelta(days=post_call_days)
+
+        # Ensure the post call date doesn't fall on a weekend or non-trading day
+        while post_call_date.weekday() > 4 or post_call_date not in original_df['date'].values:
+            post_call_date += pd.Timedelta(days=1)
+
+        # Get closing prices on the call date and the post call date
+        call_close_price = original_df.loc[(original_df['symbol'] == ticker) & (original_df['date'] == call_date), 'close'].iloc[0]
+        post_call_close_price = original_df.loc[(original_df['symbol'] == ticker) & (original_df['date'] == post_call_date), 'close'].iloc[0]
+
+        # Determine the direction (1 if price increased, 0 if decreased or unchanged)
+        direction = 1 if post_call_close_price > call_close_price else 0
+        post_call_direction.append(direction)
+
+    return post_call_direction
+
